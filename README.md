@@ -1,36 +1,37 @@
-# ⚡ AI API Semantic Cache & Cost Optimizer
+# ⚡ NEBULYN — AI-Powered Semantic Cache
 
-A full-stack AI web application that significantly reduces LLM API costs and response latency using **Semantic Caching**. 
+NEBULYN ek smart caching engine hai jo AI/LLM apps ke liye banaya gaya hai. Yeh aapke API calls ko fast banata hai, latency (delay) ko kam karta hai, aur bar-bar same sawal poochhne par paise/tokens bachata hai.
 
-Instead of sending every user query to the paid AI API (like Google Gemini or OpenAI), this system first converts the query into vector embeddings and searches a local Vector Database (ChromaDB) for similar past questions. If a similar question (e.g., >90% match) was asked before, it instantly returns the cached answer.
+---
 
-## 🚀 Key Features
-* **Semantic Caching:** Understands the *meaning* of a question, not just exact keywords. ("What is AI?" and "Explain Artificial Intelligence?" will hit the same cache).
-* **Cost Tracking:** Live dashboard showing how many API requests were bypassed and the estimated money saved.
-* **Ultra-Fast Responses:** Cache hits return answers in milliseconds (~40ms) compared to actual API calls (~1500ms).
-* **ChatGPT-Style UI:** Beautiful, continuous chat interface built with Streamlit.
+## 🚀 Yeh Kaam Kaise Karta hai?
 
-## 🛠️ Tech Stack
-* **Frontend:** Streamlit
-* **Backend:** FastAPI, Uvicorn
-* **Vector Database:** ChromaDB
-* **Embeddings:** HuggingFace `sentence-transformers` (`all-MiniLM-L6-v2`)
-* **LLM:** groq
+1. **User Query**: Jab aap chat mein koi sawal poochhte hain, toh NEBULYN sabse pehle apni local memory (cache) mein check karta hai.
+2. **Cache Hit (<15ms)**: Agar waisa milta-julta sawal pehle poochha gaya tha, toh yeh bina AI API ko call kiye turant wahi jawab de deta hai.
+3. **Cache Miss (Groq API)**: Agar naya sawal hai, toh yeh **Groq LLaMA 3.1** API ko call karta hai, real answer fetch karta hai, aur aage ke liye cache mein save kar leta hai.
 
-## 💻 How to Run Locally
+---
 
-1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git)
-   cd YOUR_REPOSITORY_NAME
-1.Install dependencies:
+## ✨ Features
+
+- **ChatGPT-Style UI**: Ekdum clean aur modern chat interface.
+- **Persistent Memory**: Page refresh karne par bhi aapka chat history aur cache delete nahi hota (`nebulyn_memory.pkl` mein save rehta hai).
+- **Live Latency Graph**: Real-time graph dikhata hai ki Cache (Green) kitna fast hai direct LLM (Red) ke mukable.
+- **Groq LLaMA 3.1 Powered**: Lightning-fast speed ke liye LLaMA 3.1 model ka use.
+
+---
+
+## 🛠️ Kaise Run Karein (Installation Guide)
+
+### 1. Requirements Install Karein
+Apne terminal mein yeh command chalayein:
+```bash
+
 pip install -r requirements.txt
-
-2.Start the FastAPI backend:
-python -m uvicorn mainvd:app --reload
-
-3.Start the Streamlit Frontend(in a new terminal):
-python -m streamlit run app.py
+2. Set Your API Key
+Insert your Groq API Key inside the app.py file in this variable:
+GROQ_API_KEY = "gsk_Your_Real_API_Key_Here"
 
 
-(Note: You will need to add your own groq API key in the backend file to test live API calls).
+3. Run the App
+streamlit run app.py
