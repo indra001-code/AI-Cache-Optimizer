@@ -4,4 +4,4 @@ streamlit
 requests
 sentence-transformers
 chromadb
-google-generativeai
+groq
