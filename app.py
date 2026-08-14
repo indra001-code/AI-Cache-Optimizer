@@ -29,7 +29,7 @@ if "stats" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.title("⚡ AI Chat with Semantic Caching (Groq Powered)")
+st.title("⚡ NEBULYN ")
 st.markdown("High-speed, quota-free AI caching system deployed on Streamlit Cloud!")
 
 st.sidebar.header("📊 Live Optimization Stats")
