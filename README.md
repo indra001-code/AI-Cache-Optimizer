@@ -23,3 +23,10 @@ Instead of sending every user query to the paid AI API (like Google Gemini or Op
    ```bash
    git clone [https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git)
    cd YOUR_REPOSITORY_NAME
+1.Install dependencies:
+pip install -r requirements.txt
+2.Start the FastAPI backend:
+python -m uvicorn mainvd:app --reload
+3.Start the Streamlit Frontend(in a new terminal):
+python -m streamlit run app.py
+(Note: You will need to add your own Google Gemini API key in the backend file to test live API calls).
