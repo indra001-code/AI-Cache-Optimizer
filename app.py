@@ -20,7 +20,7 @@ API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+    gemini_model = genai.GenerativeModel('gemini-3.7-flash')
 else:
     gemini_model = None
 
