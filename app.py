@@ -3,7 +3,7 @@ import time
 import uuid
 from sentence_transformers import SentenceTransformer
 import chromadb
-import google.generativeai as genai
+from groq import Groq
 
 st.set_page_config(page_title="AI Cache Optimizer", page_icon="⚡", layout="wide")
 
@@ -16,21 +16,21 @@ def load_ai_system():
 
 embed_model, db_collection = load_ai_system()
 
-API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# Groq API Key Secrets se uthayenge
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
 
-if API_KEY:
-    genai.configure(api_key=API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-3.0-flash')
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
 else:
-    gemini_model = None
+    groq_client = None
 
 if "stats" not in st.session_state:
     st.session_state.stats = {"total_req": 0, "hits": 0, "misses": 0, "saved": 0.0}
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.title("⚡ AI Chat with Semantic Caching")
-st.markdown("All-in-One App deployed on Streamlit Cloud!")
+st.title("⚡ AI Chat with Semantic Caching (Groq Powered)")
+st.markdown("High-speed, quota-free AI caching system deployed on Streamlit Cloud!")
 
 st.sidebar.header("📊 Live Optimization Stats")
 st.sidebar.metric("Total Requests Processed", st.session_state.stats["total_req"])
@@ -49,8 +49,8 @@ if prompt := st.chat_input("Ask a question to the AI..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        if not API_KEY:
-            st.error("⚠️ Gemini API Key missing!")
+        if not GROQ_API_KEY:
+            st.error("⚠️ Groq API Key missing! Please add it in Streamlit Secrets.")
             st.stop()
             
         with st.spinner("Processing your query..."):
@@ -66,21 +66,22 @@ if prompt := st.chat_input("Ask a question to the AI..."):
             # Check Cache Hit
             if results['distances'] and len(results['distances'][0]) > 0 and results['distances'][0][0] < 0.45:
                 cached_doc = results['documents'][0][0]
-                # Agar cache mein pehle se error save hai, toh use ignore karke fresh call karenge
-                if "API Error" not in cached_doc and "quota" not in cached_doc.lower():
+                if "API Error" not in cached_doc:
                     ai_answer = cached_doc
                     latency = round((time.time() - start_time) * 1000, 2)
                     st.session_state.stats["hits"] += 1
                     st.session_state.stats["saved"] += 0.002
                     status_msg = f"⚡ CACHE HIT | Latency: {latency} ms"
 
-            # Agar Cache Hit nahi hua ya error tha, toh real API call karenge
+            # Cache Miss - Real Groq API Call
             if not ai_answer:
                 try:
-                    response = gemini_model.generate_content(prompt)
-                    ai_answer = response.text
+                    chat_completion = groq_client.chat.completions.create(
+                        messages=[{"role": "user", "content": prompt}],
+                        model="llama-3.3-70b-versatile", # Extremely fast and smart model
+                    )
+                    ai_answer = chat_completion.choices[0].message.content
                     
-                    # Sirf successful answer hi database mein save hoga (Error save nahi hoga)
                     db_collection.add(
                         embeddings=[query_vector],
                         documents=[ai_answer],
@@ -93,7 +94,7 @@ if prompt := st.chat_input("Ask a question to the AI..."):
                     status_msg = f"🐢 CACHE MISS | Latency: {latency} ms"
                     
                 except Exception as e:
-                    ai_answer = f"⚠️ API Limit/Error: {str(e)}. Please wait 30 seconds and try again."
+                    ai_answer = f"⚠️ API Error: {str(e)}"
                     status_msg = "❌ API Error"
 
             st.markdown(ai_answer)
