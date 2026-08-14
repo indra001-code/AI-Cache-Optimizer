@@ -89,7 +89,7 @@ class NebulynEngine:
 # ==============================================================================
 
 # 🔴 YAHAN APNI GROQ API KEY DALEN 🔴
-GROQ_API_KEY = "input your key"
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
