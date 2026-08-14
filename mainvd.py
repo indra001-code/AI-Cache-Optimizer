@@ -7,8 +7,8 @@ import chromadb
 import google.generativeai as genai
 
 # ==================== CONFIGURATION ====================
-# 1. Gemini API Key Setup (Yahan apni free Gemini API Key daalein)
-GEMINI_API_KEY = "AQ.Ab8RN6KAJO8qgA9WpPV5EEudPt7lVWRYpxBc7sp0-Z9u95pfdw"  # Set your key here or via env variable
+# 1. Gemini API Key Setup
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")  # Set your key here or via env variable
 
 if GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE":
     genai.configure(api_key=GEMINI_API_KEY)
@@ -22,7 +22,7 @@ app = FastAPI(title="AI API Semantic Cache & Cost Optimizer ⚡")
 print("Loading Embedding Model...")
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Persistent Database (Server restart par bhi data safe rahega)
+# Persistent Database
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 collection = chroma_client.get_or_create_collection(name="ai_cache")
 
@@ -44,10 +44,10 @@ async def ask_ai(query: str):
     stats["total_requests"] += 1
     start_time = time.time()
     
-    # Step 1: Query ko Vector mein convert karo
+    # Step 1: convert Query into a vector
     query_vector = model.encode(query).tolist()
     
-    # Step 2: Cache search karo
+    # Step 2: Cache search 
     results = collection.query(
         query_embeddings=[query_vector],
         n_results=1
