@@ -15,7 +15,7 @@ Instead of sending every user query to the paid AI API (like Google Gemini or Op
 * **Backend:** FastAPI, Uvicorn
 * **Vector Database:** ChromaDB
 * **Embeddings:** HuggingFace `sentence-transformers` (`all-MiniLM-L6-v2`)
-* **LLM:** Google Gemini 3.5 Flash
+* **LLM:** groq
 
 ## 💻 How to Run Locally
 
@@ -33,4 +33,4 @@ python -m uvicorn mainvd:app --reload
 python -m streamlit run app.py
 
 
-(Note: You will need to add your own Google Gemini API key in the backend file to test live API calls).
+(Note: You will need to add your own groq API key in the backend file to test live API calls).
