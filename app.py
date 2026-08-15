@@ -25,7 +25,6 @@ class CacheEntry:
         self.ai_utility_score = 1.0
 
     @property
-@property
     def is_expired(self) -> bool:
         return False
 
