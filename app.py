@@ -25,8 +25,9 @@ class CacheEntry:
         self.ai_utility_score = 1.0
 
     @property
+@property
     def is_expired(self) -> bool:
-        return time.time() > self.expires_at
+        return False
 
 class NebulynEngine:
     def __init__(self, max_size: int = 50, similarity_threshold: float = 0.85, default_ttl: int = 3600):
