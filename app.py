@@ -3,15 +3,61 @@ import numpy as np
 import plotly.graph_objects as go
 import time
 import random
-import pickle
 import os
+import sqlite3
+import json
+import csv
+import io
+import hashlib
+import requests
 from typing import Dict, List, Optional, Tuple
-from groq import Groq  # Make sure to run: pip install groq
 
-STATE_FILE = "nebulyn_memory.pkl"
+DB_FILE = "nebulyn_memory.db"
 
 # ==============================================================================
-# SECTION 1: CORE NEBULYN ENGINE (Backend)
+# FREE API CONFIGURATION (Groq API - Free)
+# ==============================================================================
+
+# Try to load API key from multiple sources
+def load_groq_api_key():
+    """Load Groq API key from Streamlit secrets or environment variable."""
+    api_key = None
+    
+    # Try Streamlit secrets first
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+        if api_key and api_key != "your_groq_api_key_here":
+            return api_key
+    except:
+        pass
+    
+    # Try environment variable
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if api_key:
+        return api_key
+    
+    # Try direct assignment (for development)
+    # YAHAN APNI KEY DAAL SAKTE HO (optional)
+    # api_key = "gsk_your_key_here"
+    
+    return api_key
+
+GROQ_API_KEY = load_groq_api_key()
+
+# Available models to try (in order of preference)
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "llama3-8b-8192",
+    "llama3-70b-8192",
+    "llama-3.2-3b-preview",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+    "gemma-7b-it"
+]
+
+# ==============================================================================
+# SECTION 1: CORE NEBULYN ENGINE (Backend with SQLite + Free Embeddings)
 # ==============================================================================
 
 class CacheEntry:
@@ -26,7 +72,7 @@ class CacheEntry:
 
     @property
     def is_expired(self) -> bool:
-        return False
+        return time.time() > self.expires_at
 
 class NebulynEngine:
     def __init__(self, max_size: int = 50, similarity_threshold: float = 0.85, default_ttl: int = 3600):
@@ -34,11 +80,43 @@ class NebulynEngine:
         self.similarity_threshold = similarity_threshold
         self.default_ttl = default_ttl
         self.cache: Dict[str, CacheEntry] = {}
+        self.embedding_cache: Dict[str, np.ndarray] = {}  # Speed: cache query embeddings
 
-    def _mock_embedding(self, text: str) -> np.ndarray:
-        rng = np.random.RandomState(abs(hash(text.lower().strip())) % (2**32))
-        vec = rng.randn(64)
-        return vec / np.linalg.norm(vec)
+    def _get_embedding(self, text: str) -> np.ndarray:
+        """Generate embedding using free local method (no API needed)."""
+        # Check local cache first (speed)
+        text_hash = hashlib.md5(text.lower().strip().encode()).hexdigest()
+        if text_hash in self.embedding_cache:
+            return self.embedding_cache[text_hash]
+
+        # Use TF-IDF-like embedding (free, no API required)
+        # This creates a 512-dim vector based on character n-grams
+        vec = np.zeros(512)
+        
+        # Character-level n-grams (3-5 chars)
+        text_lower = text.lower().strip()
+        for n in range(3, 6):
+            for i in range(len(text_lower) - n + 1):
+                ngram = text_lower[i:i+n]
+                idx = hash(ngram) % 512
+                vec[idx] += 1.0
+        
+        # Add word-level features
+        words = text_lower.split()
+        for word in words:
+            idx = hash(f"word_{word}") % 512
+            vec[idx] += 2.0
+        
+        # Normalize
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        
+        # Cache it
+        if len(self.embedding_cache) < 1000:
+            self.embedding_cache[text_hash] = vec
+        
+        return vec
 
     def _cosine_similarity(self, v1: np.ndarray, v2: np.ndarray) -> float:
         dot = np.dot(v1, v2)
@@ -48,11 +126,13 @@ class NebulynEngine:
     def query(self, text: str) -> Tuple[bool, Optional[str], float, float]:
         t0 = time.perf_counter()
         now = time.time()
-        query_vec = self._mock_embedding(text)
+        query_vec = self._get_embedding(text)
 
+        # Remove expired entries from memory and DB
         expired = [k for k, v in self.cache.items() if v.is_expired]
         for k in expired:
             del self.cache[k]
+            delete_cache_entry_from_db(k)
 
         best_match = None
         best_sim = 0.0
@@ -69,6 +149,7 @@ class NebulynEngine:
             best_match.ai_utility_score = round(
                 (0.45 * min(best_match.access_count, 10) / 10.0) + (0.35 * recency_factor) + (0.20 * best_sim), 3
             )
+            update_cache_entry_score(best_match.key, best_match.access_count, best_match.ai_utility_score)
             elapsed_ms = (time.perf_counter() - t0) * 1000 + random.uniform(8.0, 15.0)
             return True, best_match.value, round(best_sim, 2), round(elapsed_ms, 2)
 
@@ -79,157 +160,423 @@ class NebulynEngine:
         if len(self.cache) >= self.max_size:
             lowest_key = min(self.cache.keys(), key=lambda k: self.cache[k].ai_utility_score)
             del self.cache[lowest_key]
+            delete_cache_entry_from_db(lowest_key)
 
-        vec = self._mock_embedding(key)
+        vec = self._get_embedding(key)
         self.cache[key] = CacheEntry(key, value, vec, ttl_seconds=self.default_ttl)
-
-
-# ==============================================================================
-# SECTION 1.2: REAL AI INTEGRATION (Groq API)
-# ==============================================================================
-
-# 🔴 YAHAN APNI GROQ API KEY DALEN 🔴
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-
-try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-except Exception as e:
-    groq_client = None
-    print(f"Failed to initialize Groq client: {e}")
-
-def fetch_real_answer(prompt: str) -> str:
-    """Fetches a real answer from Groq API (LLaMA 3.1) and caches it."""
-    if groq_client is None:
-        return "*(System Note)* Groq API key is missing or invalid. Please add your key to the code."
-        
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": "You are NEBULYN, a helpful, smart AI assistant powered by Groq and a semantic caching engine."},
-                {"role": "user", "content": prompt}
-            ],
-            # Naya aur fast model yahan update kiya gaya hai 👇
-            model="llama-3.1-8b-instant",  
-            temperature=0.7,
-            max_tokens=1024,
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        return f"*(Groq API Error)* I couldn't fetch an answer right now: {e}"
+        save_cache_entry_to_db(key, value, vec, self.default_ttl)
 
 # ==============================================================================
-# SECTION 1.5: PERSISTENCE LAYER (Auto-Save/Load without Pickling Errors)
+# FREE AI RESPONSE GENERATION (Groq API with Auto Model Detection)
 # ==============================================================================
 
-def save_memory():
-    cache_dump = {}
-    for k, v in st.session_state.engine.cache.items():
-        cache_dump[k] = {
-            "key": v.key,
-            "value": v.value,
-            "embedding": v.embedding,
-            "created_at": v.created_at,
-            "expires_at": v.expires_at,
-            "access_count": v.access_count,
-            "ai_utility_score": v.ai_utility_score
-        }
-        
-    state_data = {
-        "engine_config": {
-            "max_size": st.session_state.engine.max_size,
-            "similarity_threshold": st.session_state.engine.similarity_threshold,
-            "default_ttl": st.session_state.engine.default_ttl
-        },
-        "cache_dump": cache_dump,
-        "stats": st.session_state.stats,
-        "messages": st.session_state.messages
-    }
+@st.cache_data(ttl=300)  # Cache model list for 5 minutes
+def get_available_groq_models(api_key: str) -> List[str]:
+    """Fetch available models from Groq API."""
+    if not api_key:
+        return []
     
-    with open(STATE_FILE, "wb") as f:
-        pickle.dump(state_data, f)
+    try:
+        url = "https://api.groq.com/openai/v1/models"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            models = response.json().get("data", [])
+            return [m["id"] for m in models if m.get("active", True)]
+        return []
+    except:
+        return []
 
-def load_memory():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "rb") as f:
-                data = pickle.load(f)
-                
-            engine = NebulynEngine(
-                max_size=data["engine_config"]["max_size"],
-                similarity_threshold=data["engine_config"]["similarity_threshold"],
-                default_ttl=data["engine_config"]["default_ttl"]
-            )
-            
-            for k, v_data in data["cache_dump"].items():
-                entry = CacheEntry(v_data["key"], v_data["value"], v_data["embedding"])
-                entry.created_at = v_data["created_at"]
-                entry.expires_at = v_data["expires_at"]
-                entry.access_count = v_data["access_count"]
-                entry.ai_utility_score = v_data["ai_utility_score"]
-                engine.cache[k] = entry
-                
-            return {
-                "engine": engine,
-                "stats": data["stats"],
-                "messages": data["messages"]
-            }
-        except Exception:
-            return None
+def test_groq_model(api_key: str, model: str) -> bool:
+    """Quick test if a model works."""
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": model,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 5
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_best_groq_model(api_key: str) -> Optional[str]:
+    """Find the best available Groq model."""
+    if not api_key:
+        return None
+    
+    # First try to get available models from API
+    available_models = get_available_groq_models(api_key)
+    
+    if available_models:
+        # Filter to our preferred models if they're available
+        for preferred in GROQ_MODELS:
+            if preferred in available_models:
+                return preferred
+        # Otherwise return first available
+        return available_models[0] if available_models else None
+    
+    # Fallback: test each model individually
+    for model in GROQ_MODELS:
+        if test_groq_model(api_key, model):
+            return model
+    
     return None
 
+def get_groq_response(prompt: str, api_key: str = None) -> Tuple[Optional[str], Optional[str]]:
+    """Get response from Groq API. Returns (response_text, error_message)."""
+    if not api_key:
+        return None, "No API key found. Please add GROQ_API_KEY to .streamlit/secrets.toml"
+    
+    # Get best available model
+    model = get_best_groq_model(api_key)
+    if not model:
+        return None, "No available Groq models found. Please check your API key."
+    
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are NEBULYN, a helpful AI assistant with the spirit of the Survey Corps. Be concise but thorough."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1024
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"]["content"], None
+        elif response.status_code == 401:
+            return None, "Invalid API key (401). Please check your GROQ_API_KEY."
+        elif response.status_code == 429:
+            return None, "Rate limit exceeded (429). Please wait a moment and try again."
+        else:
+            return None, f"Groq API error ({response.status_code}): {response.text[:200]}"
+    
+    except requests.exceptions.Timeout:
+        return None, "Request timed out. Please try again."
+    except requests.exceptions.RequestException as e:
+        return None, f"Network error: {str(e)[:200]}"
+    except Exception as e:
+        return None, f"Unexpected error: {str(e)[:200]}"
+
+def get_mock_response(prompt: str) -> str:
+    """Generate a simple mock response if no API is available."""
+    topic = prompt.lower()
+    
+    if any(word in topic for word in ["hello", "hi", "hey", "namaste"]):
+        return "Hello! I'm NEBULYN, your AI assistant. I'm currently running in offline mode because the Groq API is not configured. However, my semantic cache is working perfectly!"
+    
+    if any(word in topic for word in ["cache", "semantic", "engine"]):
+        return "My semantic caching engine works by storing embeddings of previous queries and their responses. When you ask something similar, I retrieve the cached response instantly instead of generating a new one."
+    
+    if any(word in topic for word in ["attack on titan", "aot", "eren", "levi", "titan"]):
+        return "⚔️ In the world of Attack on Titan, humanity fights for survival against the Titans. Just like the Survey Corps, NEBULYN fights against slow responses and high latency!"
+    
+    return "I'm currently in offline mode because the Groq API is not configured. To enable AI responses:\n\n1. Create a `.streamlit/secrets.toml` file\n2. Add: `GROQ_API_KEY = \"your_key_here\"`\n3. Restart the app\n\nMeanwhile, try asking something similar to a previous question to see the cache in action!"
 
 # ==============================================================================
-# SECTION 2: STREAMLIT UI (ChatGPT Style)
+# SECTION 1.5: PERSISTENCE LAYER (SQLite)
+# ==============================================================================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS cache_entries
+                 (key TEXT PRIMARY KEY, value TEXT, embedding BLOB, created_at REAL,
+                  expires_at REAL, access_count INTEGER, ai_utility_score REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS stats
+                 (queries INTEGER, hits INTEGER, misses INTEGER, cost_saved REAL,
+                  latencies_llm TEXT, latencies_cache TEXT)''')
+    c.execute("SELECT COUNT(*) FROM stats")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO stats VALUES (0,0,0,0.0,'[]','[]')")
+    conn.commit()
+    conn.close()
+
+def save_cache_entry_to_db(key, value, embedding, ttl_seconds):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = time.time()
+    expires_at = now + ttl_seconds
+    c.execute('''INSERT OR REPLACE INTO cache_entries
+                 (key, value, embedding, created_at, expires_at, access_count, ai_utility_score)
+                 VALUES (?,?,?,?,?,?,?)''',
+              (key, value, embedding.tobytes(), now, expires_at, 1, 1.0))
+    conn.commit()
+    conn.close()
+
+def update_cache_entry_score(key, access_count, utility_score):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''UPDATE cache_entries SET access_count=?, ai_utility_score=? WHERE key=?''',
+              (access_count, utility_score, key))
+    conn.commit()
+    conn.close()
+
+def delete_cache_entry_from_db(key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM cache_entries WHERE key=?", (key,))
+    conn.commit()
+    conn.close()
+
+def load_all_cache_entries(engine: NebulynEngine):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT key, value, embedding, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    rows = c.fetchall()
+    conn.close()
+    EXPECTED_DIM = 512
+    skipped = 0
+    for row in rows:
+        key, value, emb_blob, created_at, expires_at, access_count, utility = row
+        try:
+            embedding = np.frombuffer(emb_blob, dtype=np.float64)
+            if embedding.size != EXPECTED_DIM:
+                skipped += 1
+                continue
+            entry = CacheEntry(key, value, embedding)
+            entry.created_at = created_at
+            entry.expires_at = expires_at
+            entry.access_count = access_count
+            entry.ai_utility_score = utility
+            engine.cache[key] = entry
+        except Exception:
+            skipped += 1
+    if skipped > 0:
+        st.warning(f"Skipped {skipped} old cache entries (dimension mismatch). They'll be re-cached.")
+
+def load_stats():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM stats LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if row:
+        queries, hits, misses, cost_saved, lat_llm_json, lat_cache_json = row
+        return {
+            "queries": queries,
+            "hits": hits,
+            "misses": misses,
+            "cost_saved": cost_saved,
+            "latencies_llm": json.loads(lat_llm_json),
+            "latencies_cache": json.loads(lat_cache_json)
+        }
+    else:
+        return {
+            "queries": 0, "hits": 0, "misses": 0, "cost_saved": 0.0,
+            "latencies_llm": [710, 680, 720],
+            "latencies_cache": [12, 14, 11]
+        }
+
+def save_stats(stats: dict):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''UPDATE stats SET queries=?, hits=?, misses=?, cost_saved=?,
+                 latencies_llm=?, latencies_cache=? WHERE rowid=1''',
+              (stats["queries"], stats["hits"], stats["misses"], stats["cost_saved"],
+               json.dumps(stats["latencies_llm"]), json.dumps(stats["latencies_cache"])))
+    conn.commit()
+    conn.close()
+
+def clear_cache_entries():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM cache_entries")
+    conn.commit()
+    conn.close()
+
+def export_cache_as_json():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT key, value, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    rows = c.fetchall()
+    conn.close()
+    data = []
+    for row in rows:
+        data.append({
+            "key": row[0],
+            "value": row[1],
+            "created_at": row[2],
+            "expires_at": row[3],
+            "access_count": row[4],
+            "ai_utility_score": row[5]
+        })
+    return json.dumps(data, indent=2)
+
+def export_cache_as_csv():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT key, value, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    rows = c.fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Key", "Value", "Created At", "Expires At", "Access Count", "Utility Score"])
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+# ==============================================================================
+# SECTION 2: STREAMLIT UI (Attack on Titan Theme)
 # ==============================================================================
 
-st.set_page_config(page_title="NEBULYN | AI Cache", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="NEBULYN | Wings of Freedom", page_icon="⚔️", layout="wide")
 
+# Custom CSS for AoT aesthetic
 st.markdown("""
     <style>
-    [data-testid="stSidebar"] { padding-top: 1rem; }
-    .status-badge { font-size: 0.85rem; padding: 4px 10px; border-radius: 6px; font-weight: 600; display: inline-block; margin-bottom: 8px; }
-    .hit { background-color: rgba(0, 210, 106, 0.15); color: #00d26a; border: 1px solid rgba(0, 210, 106, 0.4); }
-    .miss { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; border: 1px solid rgba(255, 75, 75, 0.4); }
-    .sidebar-title { font-size: 1.1rem; font-weight: 600; color: #a0a0a5; margin-bottom: 8px; margin-top: 15px; }
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Cinzel:wght@400;700&display=swap');
+
+    .stApp {
+        background: radial-gradient(circle at 50% 0%, #1a0a0a 0%, #0d0d0d 70%);
+        color: #e0e0e0;
+        font-family: 'Cinzel', serif;
+    }
+    [data-testid="stSidebar"] {
+        background: #1a0a0a;
+        border-right: 2px solid #B22222;
+        padding-top: 1rem;
+    }
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Orbitron', sans-serif;
+        color: #D4AF37;
+    }
+    .sidebar-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #D4AF37 !important;
+        margin-bottom: 8px;
+        margin-top: 15px;
+        letter-spacing: 1px;
+    }
+    .status-badge {
+        font-size: 0.85rem;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 600;
+        display: inline-block;
+        margin-bottom: 8px;
+    }
+    .hit {
+        background-color: rgba(0, 210, 106, 0.15);
+        color: #00d26a;
+        border: 1px solid rgba(0, 210, 106, 0.4);
+    }
+    .miss {
+        background-color: rgba(255, 75, 75, 0.15);
+        color: #ff4b4b;
+        border: 1px solid rgba(255, 75, 75, 0.4);
+    }
+    .stChatMessage {
+        border-radius: 10px;
+        margin: 8px 0;
+        padding: 10px;
+    }
+    .stChatMessage[data-testid="stChatMessage"] {
+        background: #1a1a1a;
+        border: 1px solid #333;
+    }
+    .stChatMessage[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarUser"]) {
+        border-left: 4px solid #B22222;
+    }
+    .stChatMessage[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) {
+        border-left: 4px solid #D4AF37;
+    }
+    .stChatInput input {
+        background: #1a1a1a;
+        color: #e0e0e0;
+        border: 1px solid #B22222;
+        border-radius: 8px;
+        padding: 10px;
+    }
+    .stButton > button {
+        background: #B22222;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s;
+    }
+    .stButton > button:hover {
+        background: #8B0000;
+        box-shadow: 0 0 10px #B22222;
+    }
+    .stDownloadButton > button {
+        background: #1a1a1a;
+        color: #D4AF37;
+        border: 1px solid #D4AF37;
+        border-radius: 8px;
+    }
+    .stDownloadButton > button:hover {
+        background: #2a2a2a;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+# Initialize SQLite DB
+init_db()
+
+# Initialize session state
 if "engine" not in st.session_state:
-    saved_state = load_memory()
-    if saved_state:
-        st.session_state.engine = saved_state["engine"]
-        st.session_state.stats = saved_state["stats"]
-        st.session_state.messages = saved_state["messages"]
-    else:
-        st.session_state.engine = NebulynEngine()
-        st.session_state.stats = {
-            "queries": 0, "hits": 0, "misses": 0, "cost_saved": 0.0,
-            "latencies_llm": [710, 680, 720], 
-            "latencies_cache": [12, 14, 11]
-        }
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Welcome to NEBULYN! ⚡\n\nI am connected to the blazing-fast Groq API (LLaMA 3). Ask me anything, and my semantic cache will learn from your queries!", "meta": None}
-        ]
-        save_memory()
+    st.session_state.engine = NebulynEngine()
+    load_all_cache_entries(st.session_state.engine)
+    st.session_state.stats = load_stats()
+    st.session_state.messages = [
+        {"role": "assistant", "content": "⚔️ **Welcome, soldier, to NEBULYN: Wings of Freedom.**\n\nI'm powered by **Groq + LLaMA 3** with auto model detection. Ask me anything!", "meta": None}
+    ]
+    st.session_state.debug_mode = False
 
 # ------------------------------------------------------------------------------
-# SIDEBAR (Dashboard & Graph)
+# SIDEBAR (Dashboard, Config, Export)
 # ------------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("<h2 style='margin-top: -40px;'>⚡ NEBULYN Engine</h2>", unsafe_allow_html=True)
-    st.markdown("**Status:** 🟢 `Online & Persistent`")
-    st.divider()
+    st.markdown("<h2 style='margin-top: -40px; text-align: center;'>⚔️ NEBULYN<br><span style='font-size:0.7em;'>Wings of Freedom</span></h2>", unsafe_allow_html=True)
     
+    # API Status
+    if GROQ_API_KEY:
+        st.markdown("**Status:** 🟢 `Online - Groq API Connected`")
+    else:
+        st.markdown("**Status:** 🟡 `Cache-Only Mode`")
+        st.info("Groq API key not found. Create `.streamlit/secrets.toml` with your key.")
+    
+    # Debug toggle
+    st.session_state.debug_mode = st.toggle("Debug Mode", value=st.session_state.debug_mode)
+    
+    st.divider()
+
     st.markdown('<div class="sidebar-title">📊 METRICS</div>', unsafe_allow_html=True)
     tot = st.session_state.stats["queries"]
     hits = st.session_state.stats["hits"]
     hit_rate = round((hits / tot * 100), 1) if tot > 0 else 0.0
-    
+
     col1, col2 = st.columns(2)
     col1.metric("Hit Rate", f"{hit_rate}%")
     col2.metric("Saved", f"${st.session_state.stats['cost_saved']:.3f}")
     st.metric("Active Cache Keys", f"{len(st.session_state.engine.cache)} / {st.session_state.engine.max_size}")
-    
+
     st.divider()
 
     st.markdown('<div class="sidebar-title">📈 LATENCY GRAPH</div>', unsafe_allow_html=True)
@@ -247,40 +594,62 @@ with st.sidebar:
     ))
 
     fig.update_layout(
-        template="plotly_dark", 
-        height=240, 
+        template="plotly_dark",
+        height=240,
         margin=dict(l=0, r=0, t=10, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1)
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)'
     )
     st.plotly_chart(fig, config={'displayModeBar': False})
-    
+
     st.divider()
-    
+
     st.markdown('<div class="sidebar-title">⚙️ ENGINE CONFIG</div>', unsafe_allow_html=True)
     prev_threshold = st.session_state.engine.similarity_threshold
     prev_ttl = st.session_state.engine.default_ttl
-    
+
     new_threshold = st.slider("Semantic Threshold", 0.70, 0.99, prev_threshold, 0.01)
     new_ttl = st.number_input("TTL (Seconds)", min_value=60, value=prev_ttl)
-    
+
     if new_threshold != prev_threshold or new_ttl != prev_ttl:
         st.session_state.engine.similarity_threshold = new_threshold
         st.session_state.engine.default_ttl = new_ttl
-        save_memory()
-    
+        save_stats(st.session_state.stats)
+
     st.divider()
-    
+
+    st.markdown('<div class="sidebar-title">📤 EXPORT DATA</div>', unsafe_allow_html=True)
+    json_data = export_cache_as_json()
+    st.download_button(
+        label="Download JSON",
+        data=json_data,
+        file_name="nebulyn_cache.json",
+        mime="application/json",
+        key="download_json"
+    )
+    csv_data = export_cache_as_csv()
+    st.download_button(
+        label="Download CSV",
+        data=csv_data,
+        file_name="nebulyn_cache.csv",
+        mime="text/csv",
+        key="download_csv"
+    )
+
+    st.divider()
+
     if st.button("🧹 Clear Chat History", use_container_width=True):
-        st.session_state.messages = [{"role": "assistant", "content": "Chat history cleared. Let's start fresh! ⚡", "meta": None}]
-        save_memory()
+        st.session_state.messages = [{"role": "assistant", "content": "Chat history cleared. The battlefield is clean, soldier.", "meta": None}]
         st.rerun()
-        
+
     if st.button("🗑️ Flush Semantic Cache", type="primary", use_container_width=True):
         st.session_state.engine.cache.clear()
+        clear_cache_entries()
         st.session_state.stats["queries"] = st.session_state.stats["hits"] = st.session_state.stats["misses"] = 0
         st.session_state.stats["cost_saved"] = 0.0
-        save_memory()
-        st.success("Memory wiped successfully.")
+        save_stats(st.session_state.stats)
+        st.success("Memory wiped. The Titans have been expelled.")
         time.sleep(0.5)
         st.rerun()
 
@@ -288,13 +657,13 @@ with st.sidebar:
 # MAIN CHAT INTERFACE
 # ------------------------------------------------------------------------------
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"], avatar="⚡" if msg["role"] == "assistant" else "👤"):
+    with st.chat_message(msg["role"], avatar="⚔️" if msg["role"] == "assistant" else "🧑‍💻"):
         st.markdown(msg["content"])
         if msg.get("meta"):
             m = msg["meta"]
             badge_class = "hit" if m["is_hit"] else "miss"
             badge_text = "🎯 CACHE HIT" if m["is_hit"] else "☁️ LLM GENERATED (MISS)"
-            
+
             with st.expander(f"Engine Log: {badge_text} | {m['latency']} ms"):
                 st.markdown(f"""
                 <span class='status-badge {badge_class}'>{badge_text}</span><br>
@@ -305,43 +674,69 @@ for msg in st.session_state.messages:
 # CHAT INPUT PROCESSING
 # ------------------------------------------------------------------------------
 if prompt := st.chat_input("Ask NEBULYN anything..."):
+    # Display user message immediately
+    with st.chat_message("user", avatar="🧑‍💻"):
+        st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt, "meta": None})
-    
+
     # 1. Query the Cache First
     is_hit, cached_response, sim_score, latency = st.session_state.engine.query(prompt)
     st.session_state.stats["queries"] += 1
-    
+
     if not is_hit:
         # Cache Miss -> Call Groq API
         st.session_state.stats["misses"] += 1
         cost_saved = 0.0
-        
-        with st.spinner("Generating answer with Groq (LLaMA 3)..."):
+
+        with st.chat_message("assistant", avatar="⚔️"):
+            message_placeholder = st.empty()
+            full_response = ""
+            error_msg = None
             t1 = time.perf_counter()
-            response = fetch_real_answer(prompt)
-            api_latency = round((time.perf_counter() - t1) * 1000, 2)
             
+            # Try Groq API
+            with st.spinner("⚔️ Generating with Groq (LLaMA 3)..."):
+                full_response, error_msg = get_groq_response(prompt, GROQ_API_KEY)
+            
+            # If Groq fails, use mock response
+            if full_response is None:
+                if st.session_state.debug_mode and error_msg:
+                    st.warning(f"Debug: {error_msg}")
+                full_response = get_mock_response(prompt)
+            
+            api_latency = round((time.perf_counter() - t1) * 1000, 2)
+            message_placeholder.markdown(full_response)
+
         st.session_state.stats["latencies_llm"].append(api_latency)
         if len(st.session_state.stats["latencies_cache"]) < len(st.session_state.stats["latencies_llm"]):
-            st.session_state.stats["latencies_cache"].append(st.session_state.stats["latencies_cache"][-1] if st.session_state.stats["latencies_cache"] else 12)
-            
-        st.session_state.engine.insert(prompt, response)
+            st.session_state.stats["latencies_cache"].append(
+                st.session_state.stats["latencies_cache"][-1] if st.session_state.stats["latencies_cache"] else 12
+            )
+
+        # Cache the response (only if it's a real response, not an error)
+        if error_msg is None or not full_response.startswith("I'm currently in offline mode"):
+            st.session_state.engine.insert(prompt, full_response)
+
         final_latency = api_latency
     else:
-        # Cache Hit -> Return immediately
+        # Cache Hit
         st.session_state.stats["hits"] += 1
         st.session_state.stats["latencies_cache"].append(latency)
         if len(st.session_state.stats["latencies_llm"]) < len(st.session_state.stats["latencies_cache"]):
-            st.session_state.stats["latencies_llm"].append(st.session_state.stats["latencies_llm"][-1] if st.session_state.stats["latencies_llm"] else 700)
-            
-        cost_saved = 0.015 # Approximated saved cost for a query
+            st.session_state.stats["latencies_llm"].append(
+                st.session_state.stats["latencies_llm"][-1] if st.session_state.stats["latencies_llm"] else 700
+            )
+
+        cost_saved = 0.015
         st.session_state.stats["cost_saved"] += cost_saved
-        response = cached_response
+        full_response = cached_response
         final_latency = latency
 
-    # Save and display message
+        with st.chat_message("assistant", avatar="⚔️"):
+            st.markdown(full_response)
+
     meta = {"is_hit": is_hit, "latency": final_latency, "similarity": sim_score, "cost_saved": cost_saved}
-    st.session_state.messages.append({"role": "assistant", "content": response, "meta": meta})
-    
-    save_memory()
+    st.session_state.messages.append({"role": "assistant", "content": full_response, "meta": meta})
+
+    save_stats(st.session_state.stats)
     st.rerun()
