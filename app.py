@@ -36,10 +36,6 @@ def load_groq_api_key():
     if api_key:
         return api_key
     
-    # Try direct assignment (for development)
-    # YAHAN APNI KEY DAAL SAKTE HO (optional)
-    # api_key = "gsk_your_key_here"
-    
     return api_key
 
 GROQ_API_KEY = load_groq_api_key()
@@ -61,58 +57,45 @@ GROQ_MODELS = [
 # ==============================================================================
 
 class CacheEntry:
-    def __init__(self, key: str, value: str, embedding: np.ndarray, ttl_seconds: int = 3600):
+    def __init__(self, key: str, value: str, embedding: np.ndarray):
         self.key = key
         self.value = value
         self.embedding = embedding
         self.created_at = time.time()
-        self.expires_at = self.created_at + ttl_seconds
         self.access_count = 1
         self.ai_utility_score = 1.0
 
-    @property
-    def is_expired(self) -> bool:
-        return time.time() > self.expires_at
-
 class NebulynEngine:
-    def __init__(self, max_size: int = 50, similarity_threshold: float = 0.85, default_ttl: int = 3600):
+    def __init__(self, max_size: int = 50, similarity_threshold: float = 0.85):
         self.max_size = max_size
         self.similarity_threshold = similarity_threshold
-        self.default_ttl = default_ttl
         self.cache: Dict[str, CacheEntry] = {}
-        self.embedding_cache: Dict[str, np.ndarray] = {}  # Speed: cache query embeddings
+        self.embedding_cache: Dict[str, np.ndarray] = {}
 
     def _get_embedding(self, text: str) -> np.ndarray:
         """Generate embedding using free local method (no API needed)."""
-        # Check local cache first (speed)
         text_hash = hashlib.md5(text.lower().strip().encode()).hexdigest()
         if text_hash in self.embedding_cache:
             return self.embedding_cache[text_hash]
 
-        # Use TF-IDF-like embedding (free, no API required)
-        # This creates a 512-dim vector based on character n-grams
         vec = np.zeros(512)
-        
-        # Character-level n-grams (3-5 chars)
         text_lower = text.lower().strip()
+        
         for n in range(3, 6):
             for i in range(len(text_lower) - n + 1):
                 ngram = text_lower[i:i+n]
                 idx = hash(ngram) % 512
                 vec[idx] += 1.0
         
-        # Add word-level features
         words = text_lower.split()
         for word in words:
             idx = hash(f"word_{word}") % 512
             vec[idx] += 2.0
         
-        # Normalize
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
         
-        # Cache it
         if len(self.embedding_cache) < 1000:
             self.embedding_cache[text_hash] = vec
         
@@ -125,14 +108,7 @@ class NebulynEngine:
 
     def query(self, text: str) -> Tuple[bool, Optional[str], float, float]:
         t0 = time.perf_counter()
-        now = time.time()
         query_vec = self._get_embedding(text)
-
-        # Remove expired entries from memory and DB
-        expired = [k for k, v in self.cache.items() if v.is_expired]
-        for k in expired:
-            del self.cache[k]
-            delete_cache_entry_from_db(k)
 
         best_match = None
         best_sim = 0.0
@@ -145,7 +121,7 @@ class NebulynEngine:
 
         if best_match and best_sim >= self.similarity_threshold:
             best_match.access_count += 1
-            recency_factor = 1.0 / (1.0 + (now - best_match.created_at) / 1800.0)
+            recency_factor = 1.0 / (1.0 + (time.time() - best_match.created_at) / 1800.0)
             best_match.ai_utility_score = round(
                 (0.45 * min(best_match.access_count, 10) / 10.0) + (0.35 * recency_factor) + (0.20 * best_sim), 3
             )
@@ -163,14 +139,14 @@ class NebulynEngine:
             delete_cache_entry_from_db(lowest_key)
 
         vec = self._get_embedding(key)
-        self.cache[key] = CacheEntry(key, value, vec, ttl_seconds=self.default_ttl)
-        save_cache_entry_to_db(key, value, vec, self.default_ttl)
+        self.cache[key] = CacheEntry(key, value, vec)
+        save_cache_entry_to_db(key, value, vec)
 
 # ==============================================================================
 # FREE AI RESPONSE GENERATION (Groq API with Auto Model Detection)
 # ==============================================================================
 
-@st.cache_data(ttl=300)  # Cache model list for 5 minutes
+@st.cache_data(ttl=300)
 def get_available_groq_models(api_key: str) -> List[str]:
     """Fetch available models from Groq API."""
     if not api_key:
@@ -213,18 +189,14 @@ def get_best_groq_model(api_key: str) -> Optional[str]:
     if not api_key:
         return None
     
-    # First try to get available models from API
     available_models = get_available_groq_models(api_key)
     
     if available_models:
-        # Filter to our preferred models if they're available
         for preferred in GROQ_MODELS:
             if preferred in available_models:
                 return preferred
-        # Otherwise return first available
         return available_models[0] if available_models else None
     
-    # Fallback: test each model individually
     for model in GROQ_MODELS:
         if test_groq_model(api_key, model):
             return model
@@ -236,7 +208,6 @@ def get_groq_response(prompt: str, api_key: str = None) -> Tuple[Optional[str], 
     if not api_key:
         return None, "No API key found. Please add GROQ_API_KEY to .streamlit/secrets.toml"
     
-    # Get best available model
     model = get_best_groq_model(api_key)
     if not model:
         return None, "No available Groq models found. Please check your API key."
@@ -300,12 +271,13 @@ def get_mock_response(prompt: str) -> str:
 # ==============================================================================
 # SECTION 1.5: PERSISTENCE LAYER (SQLite)
 # ==============================================================================
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS cache_entries
                  (key TEXT PRIMARY KEY, value TEXT, embedding BLOB, created_at REAL,
-                  expires_at REAL, access_count INTEGER, ai_utility_score REAL)''')
+                  access_count INTEGER, ai_utility_score REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS stats
                  (queries INTEGER, hits INTEGER, misses INTEGER, cost_saved REAL,
                   latencies_llm TEXT, latencies_cache TEXT)''')
@@ -315,15 +287,14 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_cache_entry_to_db(key, value, embedding, ttl_seconds):
+def save_cache_entry_to_db(key, value, embedding):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = time.time()
-    expires_at = now + ttl_seconds
     c.execute('''INSERT OR REPLACE INTO cache_entries
-                 (key, value, embedding, created_at, expires_at, access_count, ai_utility_score)
-                 VALUES (?,?,?,?,?,?,?)''',
-              (key, value, embedding.tobytes(), now, expires_at, 1, 1.0))
+                 (key, value, embedding, created_at, access_count, ai_utility_score)
+                 VALUES (?,?,?,?,?,?)''',
+              (key, value, embedding.tobytes(), now, 1, 1.0))
     conn.commit()
     conn.close()
 
@@ -345,13 +316,13 @@ def delete_cache_entry_from_db(key):
 def load_all_cache_entries(engine: NebulynEngine):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT key, value, embedding, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    c.execute("SELECT key, value, embedding, created_at, access_count, ai_utility_score FROM cache_entries")
     rows = c.fetchall()
     conn.close()
     EXPECTED_DIM = 512
     skipped = 0
     for row in rows:
-        key, value, emb_blob, created_at, expires_at, access_count, utility = row
+        key, value, emb_blob, created_at, access_count, utility = row
         try:
             embedding = np.frombuffer(emb_blob, dtype=np.float64)
             if embedding.size != EXPECTED_DIM:
@@ -359,7 +330,6 @@ def load_all_cache_entries(engine: NebulynEngine):
                 continue
             entry = CacheEntry(key, value, embedding)
             entry.created_at = created_at
-            entry.expires_at = expires_at
             entry.access_count = access_count
             entry.ai_utility_score = utility
             engine.cache[key] = entry
@@ -411,7 +381,7 @@ def clear_cache_entries():
 def export_cache_as_json():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT key, value, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    c.execute("SELECT key, value, created_at, access_count, ai_utility_score FROM cache_entries")
     rows = c.fetchall()
     conn.close()
     data = []
@@ -420,21 +390,20 @@ def export_cache_as_json():
             "key": row[0],
             "value": row[1],
             "created_at": row[2],
-            "expires_at": row[3],
-            "access_count": row[4],
-            "ai_utility_score": row[5]
+            "access_count": row[3],
+            "ai_utility_score": row[4]
         })
     return json.dumps(data, indent=2)
 
 def export_cache_as_csv():
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT key, value, created_at, expires_at, access_count, ai_utility_score FROM cache_entries")
+    c = cursor()
+    c.execute("SELECT key, value, created_at, access_count, ai_utility_score FROM cache_entries")
     rows = c.fetchall()
     conn.close()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Key", "Value", "Created At", "Expires At", "Access Count", "Utility Score"])
+    writer.writerow(["Key", "Value", "Created At", "Access Count", "Utility Score"])
     for row in rows:
         writer.writerow(row)
     return output.getvalue()
@@ -445,7 +414,7 @@ def export_cache_as_csv():
 
 st.set_page_config(page_title="NEBULYN | Wings of Freedom", page_icon="⚔️", layout="wide")
 
-# Custom CSS for AoT aesthetic
+# Custom CSS for AoT aesthetic - FIXED: Lowercase input
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Cinzel:wght@400;700&display=swap');
@@ -505,21 +474,37 @@ st.markdown("""
     .stChatMessage[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) {
         border-left: 4px solid #D4AF37;
     }
-    .stChatInput input {
+    
+    /* ===== FIX: Force Lowercase in Chat Input ===== */
+    .stChatInput input,
+    .stChatInput textarea,
+    div[data-testid="stChatInput"] input,
+    div[data-testid="stChatInput"] textarea,
+    input[type="text"] {
+        text-transform: none !important;
+        text-transform: lowercase !important;
         background: #1a1a1a;
         color: #e0e0e0;
         border: 1px solid #B22222;
         border-radius: 8px;
         padding: 10px;
+        font-family: 'Cinzel', serif;
     }
-    .stChatInput input {
-    background: #1a1a1a;
-    color: #e0e0e0;
-    border: 1px solid #B22222;
-    border-radius: 8px;
-    padding: 10px;
-    text-transform: none !important;
-}
+    
+    .stChatInput input::placeholder,
+    .stChatInput textarea::placeholder {
+        text-transform: none !important;
+        text-transform: lowercase !important;
+    }
+    
+    .stButton > button {
+        background: #B22222;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 8px 20px;
+        font-weight: 600;
+        transition: 0.3s;
     }
     .stButton > button:hover {
         background: #8B0000;
@@ -608,14 +593,11 @@ with st.sidebar:
 
     st.markdown('<div class="sidebar-title">⚙️ ENGINE CONFIG</div>', unsafe_allow_html=True)
     prev_threshold = st.session_state.engine.similarity_threshold
-    prev_ttl = st.session_state.engine.default_ttl
 
     new_threshold = st.slider("Semantic Threshold", 0.70, 0.99, prev_threshold, 0.01)
-    new_ttl = st.number_input("TTL (Seconds)", min_value=60, value=prev_ttl)
 
-    if new_threshold != prev_threshold or new_ttl != prev_ttl:
+    if new_threshold != prev_threshold:
         st.session_state.engine.similarity_threshold = new_threshold
-        st.session_state.engine.default_ttl = new_ttl
         save_stats(st.session_state.stats)
 
     st.divider()
@@ -714,7 +696,7 @@ if prompt := st.chat_input("Ask NEBULYN anything..."):
                 st.session_state.stats["latencies_cache"][-1] if st.session_state.stats["latencies_cache"] else 12
             )
 
-        # Cache the response (only if it's a real response, not an error)
+        # Cache the response
         if error_msg is None or not full_response.startswith("I'm currently in offline mode"):
             st.session_state.engine.insert(prompt, full_response)
 
