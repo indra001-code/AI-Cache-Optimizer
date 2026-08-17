@@ -397,7 +397,7 @@ def export_cache_as_json():
 
 def export_cache_as_csv():
     conn = sqlite3.connect(DB_FILE)
-    c = cursor()
+    c = conn.cursor()  # FIXED: Added conn.
     c.execute("SELECT key, value, created_at, access_count, ai_utility_score FROM cache_entries")
     rows = c.fetchall()
     conn.close()
