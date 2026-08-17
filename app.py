@@ -505,12 +505,14 @@ st.markdown("""
     .stChatMessage[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssistant"]) {
         border-left: 4px solid #D4AF37;
     }
-    .stChatInput input {
-        background: #1a1a1a;
-        color: #e0e0e0;
-        border: 1px solid #B22222;
-        border-radius: 8px;
-        padding: 10px;
+  .stChatInput input {
+     background: #1a1a1a;
+     color: #e0e0e0;
+     border: 1px solid #B22222;
+     border-radius: 8px;
+     padding: 10px;
+     text-transform: none !important;
+}
     }
     .stButton > button {
         background: #B22222;
