@@ -58,22 +58,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
-
-Copy `.env.example` to `.env` and set your Gemini key:
-
-```env
-GEMINI_API_KEY=your-gemini-api-key
-GEMINI_MODEL=gemini-1.5-flash
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-CACHE_DISTANCE_THRESHOLD=0.45
-ESTIMATED_COST_PER_QUERY=0.002
-MAX_QUERY_LENGTH=4000
-API_URL=http://127.0.0.1:8000
-```
-
-> **Never commit `.env` or API keys to source control.**
-
 ## Run locally
 
 Start the backend in one terminal:
